@@ -50,12 +50,16 @@ rm -f $GRADLE_LOCAL_PROPERTIES
 echo "sdk.dir=/opt/android/sdk" >> $GRADLE_LOCAL_PROPERTIES
 echo "ndk.dir=/opt/ndk" >> $GRADLE_LOCAL_PROPERTIES
 
+GRADLE_PARAMS="-p android assembleRelease"
 if [[ "${BUILD_ENVIRONMENT}" == *-gradle-build-only-x86_32* ]]; then
-    $GRADLE_PATH -PABI_FILTERS=x86 -p ~/workspace/android/ assembleRelease
-else
-    $GRADLE_PATH -p ~/workspace/android/ assembleRelease
+    GRADLE_PARAMS+=" -PABI_FILTERS=x86"
 fi
 
+if [ ! -z "{GRADLE_OFFLINE:-}" ]; then
+    GRADLE_PARAMS+=" --offline"
+fi
+
+$GRADLE_PATH $GRADLE_PARAMS
 
 find . -type f -name "*.a" -exec ls -lh {} \;
 
