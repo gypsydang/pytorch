@@ -8,7 +8,7 @@ import warnings
 
 import torch._jit_internal as _jit_internal
 from torch.jit.frontend import get_default_args
-from torch.nn import Module, ModuleList, Sequential, ModuleDict
+from torch.nn import Module, Sequential
 from torch._six import get_function_from_type, bind_method
 
 
@@ -68,9 +68,9 @@ def infer_raw_concrete_type(nn_module):
     """
     concrete_type = torch._C.ConcreteModuleType()
     concrete_type.add_pyclass(type(nn_module))
-    if isinstance(nn_module, (torch.nn.ModuleDict, torch.jit._ConstModuleDict)):
+    if isinstance(nn_module, (torch.nn.ModuleDict)):
         concrete_type.set_module_dict()
-    if isinstance(nn_module, (torch.nn.ModuleList, torch.nn.Sequential, torch.jit._ConstModuleList)):
+    if isinstance(nn_module, (torch.nn.ModuleList, torch.nn.Sequential)):
         concrete_type.set_module_list()
 
     added_names = set()
@@ -237,25 +237,6 @@ class ConcreteTypeStore(object):
                 hasattr(nn_module, "_concrete_type"):
             return nn_module._concrete_type
 
-        if isinstance(nn_module, (torch.nn.ModuleList, torch.nn.Sequential, torch.nn.ModuleDict)):
-            # TODO: This is here because the compilation path for constant iterable
-            # modules is different from everything else. Instead of calling
-            # create_script_module, we directly create a
-            # _ConstSequential/ModuleList/ModuleDict instance.
-            #
-            # The path used to create ConcreteTypes involves going in and analyzing
-            # all the nn.Modules ahead of time.
-            #
-            # That leads to skew where the result of generating a ConcreteType
-            # (which involves looking at torch.nn.Sequential) is different from the
-            # actual compilation path (which directly builds _ConstSequential).
-            #
-            # The right solution is to make these modules not special in the
-            # compilation path. But for now, just mimic what compilation does when
-            # generating a ConcreteType
-            scripted = create_constant_iterable_module(nn_module)
-            return scripted._concrete_type
-
         raw_concrete_type = infer_raw_concrete_type(nn_module)
 
         nn_module_type = type(nn_module)
@@ -403,7 +384,47 @@ def create_script_module_impl(nn_module, concrete_type, cpp_module, stubs):
         # nn.Module.forward)
         script_module.__dict__[name] = script_method
 
+
+    # copy over python methods to script module if they aren't defined on the script module
+    # this is currently an internal api used only on module containers
+    for name in dir(nn_module):
+        item = getattr(nn_module, name, None)
+        if _jit_internal.get_torchscript_modifier(item) is _jit_internal.FunctionModifiers.COPY_TO_SCRIPT_WRAPPER:
+            add_python_attr_to_scripted_model(script_module, nn_module, name)
+
+    if isinstance(nn_module, Sequential):
+        add_sequential_forward(script_module, nn_module)
+
     return script_module
+
+
+# We define shims of certain attributes on the RecursiveScriptModule to support
+# magic methods. To check if a script model defines an attribute we need
+# to also check that the attribute is not the shim
+def script_model_defines_attr(script_model, attr):
+    script_attr = getattr(script_model, attr, None)
+    if script_attr is None:
+        return False
+    default_attr = get_function_from_type(torch.jit.RecursiveScriptModule, attr)
+    if default_attr is None:
+        return False
+    return script_attr != default_attr
+
+def add_python_attr_to_scripted_model(script_model, orig, attr):
+    if hasattr(orig, attr) and script_model_defines_attr(script_model, attr):
+        setattr(script_model, attr, getattr(orig, attr))
+
+def add_sequential_forward(script_module, nn_module):
+    forward_func = getattr(nn_module.forward, "__func__", None)
+    # we aren't currently able to support compiling Sequential.forward
+    # so if we encounter it, use this forward instead. support for self._modules.values() is blocking
+    if forward_func == get_function_from_type(Sequential, "forward"):
+        script_module.define("""
+        def forward(self, input):
+            for m in self:
+                input = m(input)
+            return input
+        """)
 
 def get_overload_annotations(mod):
     # original function => [(mangled overload name, overload function)]
@@ -456,6 +477,9 @@ def check_module_initialized(mod):
         raise RuntimeError("'{}' has not been initialized, did you forget to call 'super()'?"
                            .format(type(mod).__name__))
 
+def get_unbound_method_func(unbound_method):
+    return getattr(unbound_method, "__func__", unbound_method)
+
 def infer_methods_to_compile(nn_module):
     """
     Implements the default rules for which methods should act as starting
@@ -465,7 +489,10 @@ def infer_methods_to_compile(nn_module):
 
     methods = []
     if hasattr(nn_module, 'forward'):
-        if getattr(nn_module.forward, "__func__", None) == torch.nn.Module.forward:
+        forward_func = getattr(nn_module.forward, "__func__", None)
+        module_forward = get_function_from_type(torch.nn.Module, "forward")
+        sequential_forward = get_function_from_type(Sequential, "forward")
+        if forward_func == module_forward or forward_func == sequential_forward:
             # TODO, we deleted a check that forward is actually defined, instead skipping it
             pass
         elif not _jit_internal.is_ignored_fn(nn_module.forward):
@@ -520,10 +547,6 @@ def recursive_script(nn_module):
 
     check_module_initialized(nn_module)
 
-    if isinstance(nn_module, (torch.nn.ModuleList, torch.nn.Sequential, torch.nn.ModuleDict)):
-        # Create constant versions for the iterable modules
-        return create_constant_iterable_module(nn_module)
-
     return create_script_module(nn_module, infer_methods_to_compile(nn_module))
 
 def try_compile_fn(fn, loc):
@@ -546,26 +569,6 @@ def try_compile_fn(fn, loc):
     # object
     rcb = _jit_internal.createResolutionCallbackFromClosure(fn)
     return torch.jit.script(fn, _rcb=rcb)
-
-def create_constant_iterable_module(module):
-    modules = collections.OrderedDict()
-
-    for key, submodule in module._modules.items():
-        if isinstance(submodule, (ModuleList, Sequential, ModuleDict)):
-            # Make each item in the module a constant
-            modules[key] = create_constant_iterable_module(submodule)
-        else:
-            modules[key] = recursive_script(submodule)
-
-    if isinstance(module, Sequential):
-        return torch.jit._ConstSequential(Sequential(modules))
-    elif isinstance(module, ModuleList):
-        return torch.jit._ConstModuleList(modules)
-    elif isinstance(module, ModuleDict):
-        return torch.jit._ConstModuleDict(modules)
-    else:
-        raise RuntimeError("Only nn.ModuleList, nn.Sequential, and nn.ModuleDict can be made "
-                           "into constant modules, found {}".format(module))
 
 def wrap_cpp_module(cpp_module):
     """
