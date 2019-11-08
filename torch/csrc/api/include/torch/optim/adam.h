@@ -28,7 +28,7 @@ struct TORCH_API AdamOptions {
   TORCH_ARG(bool, amsgrad) = false;
 };
 
-class TORCH_API Adam : public Optimizer {
+class TORCH_API Adam : public Optimizer<> {
  public:
   template <typename ParameterContainer>
   explicit Adam(ParameterContainer&& parameters, const AdamOptions& options_)

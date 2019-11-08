@@ -12,13 +12,16 @@
 namespace torch {
 namespace optim {
 namespace detail {
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 OptimizerBase::OptimizerBase(std::vector<Tensor> parameters)
     : parameters_(std::move(parameters)) {}
 
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 void OptimizerBase::add_parameters(const std::vector<Tensor>& parameters) {
   parameters_.insert(parameters_.end(), parameters.begin(), parameters.end());
 }
 
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 void OptimizerBase::zero_grad() {
   for (auto& parameter : parameters_) {
     if (parameter.grad().defined()) {
@@ -27,7 +30,7 @@ void OptimizerBase::zero_grad() {
     }
   }
   for (auto& group : param_groups) {
-    for (auto& p : group.at("params").toTensorListRef()) {
+    for (auto& p : group.params()) {
       if(p.grad().defined()) {
         p.grad().detach_();
         p.grad().zero_();
@@ -36,18 +39,22 @@ void OptimizerBase::zero_grad() {
   }
 }
 
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 const std::vector<Tensor>& OptimizerBase::parameters() const noexcept {
   return parameters_;
 }
 
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 std::vector<Tensor>& OptimizerBase::parameters() noexcept {
   return parameters_;
 }
 
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 size_t OptimizerBase::size() const noexcept {
   return parameters_.size();
 }
 
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 Tensor& OptimizerBase::buffer_at(std::vector<Tensor>& buffers, size_t index) {
   if (buffers.size() <= index) {
     buffers.reserve(index);
@@ -65,13 +72,15 @@ Tensor& OptimizerBase::buffer_at(std::vector<Tensor>& buffers, size_t index) {
   return buffers[index];
 }
 
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 void OptimizerBase::save(serialize::OutputArchive& archive) const {}
+template <typename OptimizerParamState, typename OptimizerParamGroup, typename OptimizerOptions>
 void OptimizerBase::load(serialize::InputArchive& archive) {}
 
 /// Serializes an `OptimizerBase` into an `OutputArchive`.
 serialize::OutputArchive& operator<<(
     serialize::OutputArchive& archive,
-    const OptimizerBase& optimizer) {
+    const OptimizerBase<>& optimizer) {
   optimizer.save(archive);
   return archive;
 }
@@ -79,7 +88,7 @@ serialize::OutputArchive& operator<<(
 /// Deserializes a `Tensor` from an `InputArchive`.
 serialize::InputArchive& operator>>(
     serialize::InputArchive& archive,
-    OptimizerBase& optimizer) {
+    OptimizerBase<>& optimizer) {
   optimizer.load(archive);
   return archive;
 }

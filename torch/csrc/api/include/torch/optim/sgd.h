@@ -28,7 +28,7 @@ struct TORCH_API SGDOptions {
   TORCH_ARG(bool, nesterov) = false;
 };
 
-class TORCH_API SGD : public Optimizer {
+class TORCH_API SGD : public Optimizer<> {
  public:
   template <typename ParameterContainer>
   explicit SGD(ParameterContainer&& parameters, const SGDOptions& options_)
